@@ -2,9 +2,9 @@ name: .NET Build & Test (auto-split by test class)
 
 on:
   push:
-    branches: ['**']          # run on all branches
+    branches: ['**']
   pull_request:
-    branches: ['**']          # PRs to any branch
+    branches: ['**']
   workflow_dispatch: {}
 
 concurrency:
@@ -31,7 +31,6 @@ jobs:
         run: |
           $root = Join-Path $PWD "Tests"
           if (-not (Test-Path $root)) {
-            Write-Host "No 'Tests' folder found."
             $empty = @{ class = @() } | ConvertTo-Json -Compress
             "matrix=$empty" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             "count=0"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -41,13 +40,12 @@ jobs:
           $files = Get-ChildItem -Path $root -Filter '*Tests.cs' -Recurse -ErrorAction SilentlyContinue
           $classes = @()
           foreach ($f in $files) {
-            $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)  # e.g. BatchValidatorTests
+            $base = [IO.Path]::GetFileNameWithoutExtension($f.Name)  # e.g. IntegrationTests
             if ($classes -notcontains $base) { $classes += $base }
           }
 
           $matrixObj = @{ class = $classes }
           $matrixJson = $matrixObj | ConvertTo-Json -Compress
-          Write-Host "Discovered classes: $($classes -join ', ')"
           "matrix=$matrixJson" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "count=$($classes.Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
@@ -74,21 +72,23 @@ jobs:
       - name: Build (Release)
         run: dotnet build "${{ env.SOLUTION }}" --no-restore --configuration Release
 
-      # Light assertion so you get a clear error if the filter matches nothing
+      # Assert at least one xUnit test contains "<namespace>.Tests.<CLASS>"
       - name: Ensure class exists in test list
         shell: pwsh
         run: |
           $list = dotnet test "${{ env.SOLUTION }}" --no-build --list-tests
-          if ($list -notmatch ("\b{0}\b" -f $env:CLASS)) {
-            throw "No tests found for class '$env:CLASS'."
+          # Dump a small preview to logs for debugging
+          $list | Select-Object -First 200
+          if ($list -notmatch ("\.Tests\.$env:CLASS(\.|$)")) {
+            throw "No tests found that match pattern '.Tests.$env:CLASS'. Example expected FQN: 'YourNamespace.Tests.$env:CLASS.<Method>'."
           }
 
-      - name: Run tests (ClassName=${{ env.CLASS }})
+      - name: Run tests (xUnit filter by FullyQualifiedName)
         run: |
           dotnet test "${{ env.SOLUTION }}" \
             --no-build --configuration Release \
-            --filter "ClassName=${{ env.CLASS }}" \
-            --logger "trx" \
+            --filter "FullyQualifiedName~.Tests.${{ env.CLASS }}" \
+            --logger "trx;LogFileName=${{ env.CLASS }}.trx" \
             --collect "XPlat Code Coverage"
 
       - name: Collect TRX & coverage artifacts
@@ -97,9 +97,8 @@ jobs:
           mkdir -p artifacts/testresults artifacts/coverage
           find . -type f -path "*/TestResults/*.trx" -exec cp {} artifacts/testresults/ \; || true
           find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
-          # Always leave something so the artifact exists
           if [ -z "$(ls -A artifacts/testresults 2>/dev/null)" ]; then
-            echo "No TRX produced for ${CLASS}" > artifacts/testresults/no-tests.txt
+            echo "No TRX produced for $CLASS" > artifacts/testresults/no-tests.txt
           fi
 
       - name: Upload TRX
@@ -130,7 +129,6 @@ jobs:
           merge-multiple: true
           path: downloads/testresults
 
-      # Nice summary (table + PR check) from TRX files
       - name: Publish unit test summary
         uses: EnricoMi/publish-unit-test-result-action@v2
         with:
@@ -138,24 +136,3 @@ jobs:
           check_name: ".NET Tests Summary"
           comment_mode: off
           fail_on: nothing
-
-      # Quick totals in the run summary
-      - name: Totals (Markdown)
-        shell: pwsh
-        run: |
-          $trxFiles = Get-ChildItem -Path "downloads/testresults" -Recurse -Filter *.trx -ErrorAction SilentlyContinue
-          if (-not $trxFiles) {
-            "## Test Summary`nNo TRX files found." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY
-            exit 0
-          }
-          function N($v){ if ($null -eq $v -or $v -eq "") {0} else {[int]$v} }
-          $T=0;$P=0;$F=0;$S=0
-          foreach($f in $trxFiles){
-            [xml]$x = Get-Content $f.FullName
-            $c = $x.TestRun.ResultSummary.Counters
-            $T += N $c.total
-            $P += N $c.passed
-            $F += (N $c.failed) + (N $c.error)
-            $S += (N $c.notExecuted) + (N $c.inconclusive) + (N $c.notRunnable) + (N $c.pending) + (N $c.aborted) + (N $c.timeout)
-          }
-          "## Totals`n- Total: $T`n- Passed: $P`n- Failed: $F`n- Skipped: $S" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY
