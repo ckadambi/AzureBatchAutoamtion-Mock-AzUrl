@@ -2,9 +2,9 @@ name: .NET Build & Test
 
 on:
   push:
-    branches: ['**']          # ← run on all branches
+    branches: ['**']
   pull_request:
-    branches: ['**']          # ← run for PRs targeting any branch
+    branches: ['**']
   workflow_dispatch: {}
 
 concurrency:
@@ -19,89 +19,172 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        dotnet: [ '8.0.x' ]
+        dotnet: ['8.0.x']
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET ${{ matrix.dotnet }}
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ matrix.dotnet }}
 
-      - name: Cache NuGet
+      - name: Cache NuGet packages
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.nuget/packages
-            # Windows
-            ~\AppData\Local\NuGet\Cache
-            # Linux
-            ~/.local/share/NuGet/Cache
-          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.sln', '**/*.csproj', '**/packages.lock.json') }}
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
           restore-keys: |
             ${{ runner.os }}-nuget-
 
-      - name: Restore
-        run: dotnet restore AzureBatchJobAutomation.sln
+      - name: Restore dependencies
+        run: dotnet restore
 
-      - name: Build (Release)
-        run: dotnet build AzureBatchJobAutomation.sln --no-restore --configuration Release
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: build-artifacts-${{ matrix.os }}
-          path: |
-            **/bin/Release/
-            **/obj/Release/
+          name: build-${{ matrix.os }}
+          path: '**/bin/Release/net8.0'
           retention-days: 1
 
-  test:
+  unit-tests:
     needs: build
-    name: Run Tests
+    name: Unit Tests
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        dotnet: [ '8.0.x' ]
+        dotnet: ['8.0.x']
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET ${{ matrix.dotnet }}
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ matrix.dotnet }}
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: build-artifacts-${{ matrix.os }}
+          name: build-${{ matrix.os }}
+          path: bin/Release/net8.0
 
-      - name: Run Tests
+      - name: Run Unit Tests
         run: |
-          dotnet test Tests/*.cs --logger "trx;LogFileName=test-results.trx" --logger "console;verbosity=detailed" --configuration Release
+          dotnet test Tests/BatchValidatorTests.cs --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=unit-tests.trx"
         continue-on-error: true
 
-      - name: Test Report
+      - name: Generate Unit Test Report
         uses: dorny/test-reporter@v1
-        if: success() || failure()
+        if: always()
         with:
-          name: Test Results (${{ matrix.os }})
-          path: "**/test-results.trx"
+          name: Unit Test Results (${{ matrix.os }})
+          path: "**/unit-tests.trx"
           reporter: dotnet-trx
           fail-on-error: false
 
-      - name: Generate Test Summary
-        if: success() || failure()
+      - name: Upload Unit Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results-${{ matrix.os }}
+          path: "**/unit-tests.trx"
+          retention-days: 30
+
+  integration-tests:
+    needs: build
+    name: Integration Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        dotnet: ['8.0.x']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ matrix.os }}
+          path: bin/Release/net8.0
+
+      - name: Run Integration Tests
         run: |
-          echo "## Test Results Summary for ${{ matrix.os }}" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Passed: $(grep -c "outcome=\"Passed\"" **/test-results.trx)" >> $GITHUB_STEP_SUMMARY
-          echo "❌ Failed: $(grep -c "outcome=\"Failed\"" **/test-results.trx)" >> $GITHUB_STEP_SUMMARY
-          echo "⏭️ Skipped: $(grep -c "outcome=\"Skipped\"" **/test-results.trx)" >> $GITHUB_STEP_SUMMARY
+          dotnet test Tests/IntegrationTests.cs --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=integration-tests.trx"
+        continue-on-error: true
+
+      - name: Generate Integration Test Report
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Integration Test Results (${{ matrix.os }})
+          path: "**/integration-tests.trx"
+          reporter: dotnet-trx
+          fail-on-error: false
+
+      - name: Upload Integration Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results-${{ matrix.os }}
+          path: "**/integration-tests.trx"
+          retention-days: 30
+
+  test-summary:
+    needs: [unit-tests, integration-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    name: Test Summary
+    steps:
+      - name: Download Test Results
+        uses: actions/download-artifact@v4
+        with:
+          path: test-results
+          pattern: '*-test-results-*'
+          merge-multiple: true
+
+      - name: Publish Test Summary
+        shell: pwsh
+        run: |
+          $unitTests = Get-ChildItem -Path "test-results" -Filter "unit-tests.trx" -Recurse
+          $integrationTests = Get-ChildItem -Path "test-results" -Filter "integration-tests.trx" -Recurse
+          
+          echo "## 📊 Test Summary" >> $env:GITHUB_STEP_SUMMARY
+          echo "### Unit Tests" >> $env:GITHUB_STEP_SUMMARY
+          foreach ($file in $unitTests) {
+              $content = Get-Content $file.FullName
+              $passed = ([regex]::Matches($content, 'outcome="Passed"')).Count
+              $failed = ([regex]::Matches($content, 'outcome="Failed"')).Count
+              $skipped = ([regex]::Matches($content, 'outcome="Skipped"')).Count
+              echo "- ✅ Passed: $passed" >> $env:GITHUB_STEP_SUMMARY
+              echo "- ❌ Failed: $failed" >> $env:GITHUB_STEP_SUMMARY
+              echo "- ⏭️ Skipped: $skipped" >> $env:GITHUB_STEP_SUMMARY
+          }
+          
+          echo "### Integration Tests" >> $env:GITHUB_STEP_SUMMARY
+          foreach ($file in $integrationTests) {
+              $content = Get-Content $file.FullName
+              $passed = ([regex]::Matches($content, 'outcome="Passed"')).Count
+              $failed = ([regex]::Matches($content, 'outcome="Failed"')).Count
+              $skipped = ([regex]::Matches($content, 'outcome="Skipped"')).Count
+              echo "- ✅ Passed: $passed" >> $env:GITHUB_STEP_SUMMARY
+              echo "- ❌ Failed: $failed" >> $env:GITHUB_STEP_SUMMARY
+              echo "- ⏭️ Skipped: $skipped" >> $env:GITHUB_STEP_SUMMARY
+          }
 
    
