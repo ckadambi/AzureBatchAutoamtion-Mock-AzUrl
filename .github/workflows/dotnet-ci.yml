@@ -1,4 +1,5 @@
 name: .NET Build & Test
+name: .NET Build & Test
 
 on:
   push:
@@ -59,9 +60,9 @@ jobs:
           path: '**/bin/Release/net8.0'
           retention-days: 1
 
-  validator-tests:
+  test:
     needs: build
-    name: Validator Tests
+    name: Run all tests (auto-discover)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -78,169 +79,225 @@ jobs:
         with:
           dotnet-version: ${{ matrix.dotnet }}
 
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-${{ matrix.os }}
-          path: bin/Release/net8.0
+      - name: Restore (test run)
+        run: dotnet restore
 
-      - name: Run Validator Tests
+      - name: Run tests (solution)
         run: |
-          dotnet test "Tests/BatchValidator*.cs" --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=validator-tests.trx"
+          if ($env:RUNNER_OS -eq 'Windows') { md TestResults } else { mkdir -p TestResults }
+          dotnet test AzureBatchJobAutomation.sln --configuration Release --no-build \
+            --logger "trx;LogFileName=all-tests-${{ matrix.os }}.trx" \
+            --results-directory TestResults \
+            --collect:"XPlat Code Coverage"
+        shell: pwsh
         continue-on-error: true
 
-      - name: Generate Test Report
-        uses: dorny/test-reporter@v1
-        if: always()
-        with:
-          name: Validator Test Results (${{ matrix.os }})
-          path: "**/validator-tests.trx"
-          reporter: dotnet-trx
-          fail-on-error: false
-
-      - name: Upload Test Results
+      - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: validator-test-results-${{ matrix.os }}
-          path: "**/validator-tests.trx"
+          name: test-results-${{ matrix.os }}
+          path: TestResults
           retention-days: 30
 
-  executor-tests:
-    needs: build
-    name: Executor Tests
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        dotnet: ['8.0.x']
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - name: Upload coverage to Codecov (only ubuntu)
+        if: always() && runner.os == 'Linux'
+        uses: codecov/codecov-action@v3
         with:
-          dotnet-version: ${{ matrix.dotnet }}
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-${{ matrix.os }}
-          path: bin/Release/net8.0
-
-      - name: Run Executor Tests
-        run: |
-          dotnet test "Tests/*Executor*.cs" --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=executor-tests.trx"
-        continue-on-error: true
-
-      - name: Generate Test Report
-        uses: dorny/test-reporter@v1
-        if: always()
-        with:
-          name: Executor Test Results (${{ matrix.os }})
-          path: "**/executor-tests.trx"
-          reporter: dotnet-trx
-          fail-on-error: false
-
-      - name: Upload Test Results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: executor-test-results-${{ matrix.os }}
-          path: "**/executor-tests.trx"
-          retention-days: 30
-
-  integration-tests:
-    needs: build
-    name: Integration Tests
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        dotnet: ['8.0.x']
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ matrix.dotnet }}
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-${{ matrix.os }}
-          path: bin/Release/net8.0
-
-      - name: Run Integration Tests
-        run: |
-          dotnet test "Tests/*Integration*.cs" --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=integration-tests.trx"
-        continue-on-error: true
-
-      - name: Generate Test Report
-        uses: dorny/test-reporter@v1
-        if: always()
-        with:
-          name: Integration Test Results (${{ matrix.os }})
-          path: "**/integration-tests.trx"
-          reporter: dotnet-trx
-          fail-on-error: false
-
-      - name: Upload Integration Test Results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: integration-test-results-${{ matrix.os }}
-          path: "**/integration-tests.trx"
-          retention-days: 30
+          files: TestResults/**/coverage.cobertura.xml
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   test-summary:
-    needs: [validator-tests, executor-tests, integration-tests]
+    needs: test
     if: always()
     runs-on: ubuntu-latest
     name: Test Summary
     steps:
-      - name: Download Test Results
+      - name: Download all test artifacts
         uses: actions/download-artifact@v4
         with:
           path: test-results
-          pattern: '*-test-results-*'
-          merge-multiple: true
 
       - name: Publish Test Summary
         shell: pwsh
         run: |
-          $testTypes = @{
-            "Validator Tests" = "validator-tests.trx"
-            "Executor Tests" = "executor-tests.trx"
-            "Integration Tests" = "integration-tests.trx"
-          }
-          
-          echo "## 📊 Test Summary" >> $env:GITHUB_STEP_SUMMARY
-          
-          foreach ($testType in $testTypes.Keys) {
-            $files = Get-ChildItem -Path "test-results" -Filter $testTypes[$testType] -Recurse
-            
-            echo "### $testType" >> $env:GITHUB_STEP_SUMMARY
-            foreach ($file in $files) {
-                $content = Get-Content $file.FullName
-                $passed = ([regex]::Matches($content, 'outcome="Passed"')).Count
-                $failed = ([regex]::Matches($content, 'outcome="Failed"')).Count
-                $skipped = ([regex]::Matches($content, 'outcome="Skipped"')).Count
-                $total = $passed + $failed + $skipped
-                
-                echo "- 📝 Total: $total" >> $env:GITHUB_STEP_SUMMARY
-                echo "- ✅ Passed: $passed" >> $env:GITHUB_STEP_SUMMARY
-                echo "- ❌ Failed: $failed" >> $env:GITHUB_STEP_SUMMARY
-                echo "- ⏭️ Skipped: $skipped" >> $env:GITHUB_STEP_SUMMARY
-                echo "" >> $env:GITHUB_STEP_SUMMARY
-            }
+          $files = Get-ChildItem -Path "test-results" -Filter "*.trx" -Recurse
+          if ($files.Count -eq 0) {
+            echo "No test result files found" >> $env:GITHUB_STEP_SUMMARY
+            exit 0
           }
 
-   
+          $totalPassed = 0; $totalFailed = 0; $totalSkipped = 0; $totalTests = 0
+          echo "## 📊 Test Summary" >> $env:GITHUB_STEP_SUMMARY
+          foreach ($file in $files) {
+            $content = Get-Content $file.FullName
+            $passed = ([regex]::Matches($content, 'outcome="Passed"')).Count
+            $failed = ([regex]::Matches($content, 'outcome="Failed"')).Count
+            $skipped = ([regex]::Matches($content, 'outcome="Skipped"')).Count
+            $total = $passed + $failed + $skipped
+            $name = $file.Directory.Name + '/' + $file.Name
+
+            echo "### $name" >> $env:GITHUB_STEP_SUMMARY
+            echo "- 📝 Total: $total" >> $env:GITHUB_STEP_SUMMARY
+            echo "- ✅ Passed: $passed" >> $env:GITHUB_STEP_SUMMARY
+            echo "- ❌ Failed: $failed" >> $env:GITHUB_STEP_SUMMARY
+            name: .NET Build & Test
+
+            on:
+              push:
+                branches: ['**']
+                paths:
+                  - '**/*.cs'
+                  - '**/*.csproj'
+                  - '.github/workflows/*.yml'
+              pull_request:
+                branches: ['**']
+                paths:
+                  - '**/*.cs'
+                  - '**/*.csproj'
+                  - '.github/workflows/*.yml'
+              workflow_dispatch: {}
+
+            concurrency:
+              group: ${{ github.workflow }}-${{ github.ref }}
+              cancel-in-progress: true
+
+            jobs:
+              build:
+                name: Build
+                runs-on: ${{ matrix.os }}
+                strategy:
+                  fail-fast: false
+                  matrix:
+                    os: [ubuntu-latest, windows-latest]
+                    dotnet: ['8.0.x']
+
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+
+                  - name: Setup .NET
+                    uses: actions/setup-dotnet@v4
+                    with:
+                      dotnet-version: ${{ matrix.dotnet }}
+
+                  - name: Cache NuGet packages
+                    uses: actions/cache@v4
+                    with:
+                      path: ~/.nuget/packages
+                      key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+                      restore-keys: |
+                        ${{ runner.os }}-nuget-
+
+                  - name: Restore dependencies
+                    run: dotnet restore
+
+                  - name: Build
+                    run: dotnet build --configuration Release --no-restore
+
+                  - name: Upload build artifacts
+                    uses: actions/upload-artifact@v4
+                    with:
+                      name: build-${{ matrix.os }}
+                      path: '**/bin/Release/net8.0'
+                      retention-days: 1
+
+              test:
+                needs: build
+                name: Run all tests (solution)
+                runs-on: ${{ matrix.os }}
+                strategy:
+                  fail-fast: false
+                  matrix:
+                    os: [ubuntu-latest, windows-latest]
+                    dotnet: ['8.0.x']
+
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+
+                  - name: Setup .NET
+                    uses: actions/setup-dotnet@v4
+                    with:
+                      dotnet-version: ${{ matrix.dotnet }}
+
+                  - name: Restore (test run)
+                    run: dotnet restore
+
+                  - name: Run all tests and collect coverage
+                    shell: pwsh
+                    run: |
+                      if ($env:RUNNER_OS -eq 'Windows') { md TestResults | Out-Null } else { mkdir -p TestResults }
+                      dotnet test AzureBatchJobAutomation.sln --configuration Release --no-build \
+                        --logger "trx;LogFileName=all-tests-${{ matrix.os }}.trx" \
+                        --results-directory TestResults \
+                        --collect:"XPlat Code Coverage"
+                    continue-on-error: true
+
+                  - name: Upload test results
+                    if: always()
+                    uses: actions/upload-artifact@v4
+                    with:
+                      name: test-results-${{ matrix.os }}
+                      path: TestResults
+                      retention-days: 30
+
+                  - name: Upload coverage to Codecov (ubuntu only)
+                    if: always() && runner.os == 'Linux'
+                    uses: codecov/codecov-action@v3
+                    with:
+                      files: TestResults/**/coverage.cobertura.xml
+                    env:
+                      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+              test-summary:
+                needs: test
+                if: always()
+                runs-on: ubuntu-latest
+                name: Test Summary
+                steps:
+                  - name: Download all test artifacts
+                    uses: actions/download-artifact@v4
+                    with:
+                      path: test-results
+
+                  - name: Publish Test Summary
+                    shell: pwsh
+                    run: |
+                      $files = Get-ChildItem -Path "test-results" -Filter "*.trx" -Recurse
+                      if ($files.Count -eq 0) {
+                        echo "No test result files found" >> $env:GITHUB_STEP_SUMMARY
+                        exit 0
+                      }
+
+                      $totalPassed = 0; $totalFailed = 0; $totalSkipped = 0; $totalTests = 0
+                      echo "## 📊 Test Summary" >> $env:GITHUB_STEP_SUMMARY
+                      foreach ($file in $files) {
+                        $content = Get-Content $file.FullName
+                        $passed = ([regex]::Matches($content, 'outcome="Passed"')).Count
+                        $failed = ([regex]::Matches($content, 'outcome="Failed"')).Count
+                        $skipped = ([regex]::Matches($content, 'outcome="Skipped"')).Count
+                        $total = $passed + $failed + $skipped
+                        $name = $file.Directory.Name + '/' + $file.Name
+
+                        echo "### $name" >> $env:GITHUB_STEP_SUMMARY
+                        echo "- 📝 Total: $total" >> $env:GITHUB_STEP_SUMMARY
+                        echo "- ✅ Passed: $passed" >> $env:GITHUB_STEP_SUMMARY
+                        echo "- ❌ Failed: $failed" >> $env:GITHUB_STEP_SUMMARY
+                        echo "- ⏭️ Skipped: $skipped" >> $env:GITHUB_STEP_SUMMARY
+                        echo "" >> $env:GITHUB_STEP_SUMMARY
+
+                        $totalPassed += $passed
+                        $totalFailed += $failed
+                        $totalSkipped += $skipped
+                        $totalTests += $total
+                      }
+
+                      echo "---" >> $env:GITHUB_STEP_SUMMARY
+                      echo "## ✅ Overall" >> $env:GITHUB_STEP_SUMMARY
+                      echo "- 📝 Total tests: $totalTests" >> $env:GITHUB_STEP_SUMMARY
+                      echo "- ✅ Total passed: $totalPassed" >> $env:GITHUB_STEP_SUMMARY
+                      echo "- ❌ Total failed: $totalFailed" >> $env:GITHUB_STEP_SUMMARY
+                      echo "- ⏭️ Total skipped: $totalSkipped" >> $env:GITHUB_STEP_SUMMARY
+
