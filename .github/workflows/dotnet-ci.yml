@@ -7,20 +7,19 @@ on:
     branches: ['**']          # ← run for PRs targeting any branch
   workflow_dispatch: {}
 
-# Avoid duplicate runs on the same branch/PR
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-test:
-    name: Build & Test (matrix)
+  build:
+    name: Build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        dotnet: [ '8.0.x' ]   # bump or add versions as needed
+        dotnet: [ '8.0.x' ]
 
     steps:
       - name: Checkout
@@ -50,128 +49,59 @@ jobs:
       - name: Build (Release)
         run: dotnet build AzureBatchJobAutomation.sln --no-restore --configuration Release
 
-      # Collect coverage via coverlet.collector and output TRX + Cobertura.
-      - name: Test with coverage
-        run: |
-          dotnet test AzureBatchJobAutomation.sln \
-            --no-build --configuration Release \
-            --logger "trx;LogFileName=test_results.trx" \
-            --collect "XPlat Code Coverage"
-
-      # Grab artifacts (TRX + coverage) from all test projects
-      - name: Find test & coverage artifacts
-        shell: bash
-        run: |
-          mkdir -p artifacts/testresults
-          mkdir -p artifacts/coverage
-          # TRX results (named test_results.trx by logger, in project TestResults subfolders)
-          find . -type f -name "test_results.trx" -exec cp {} artifacts/testresults/ \; || true
-          # Coverage (Cobertura xml)
-          find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
-
-      - name: Upload Test Results
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
         with:
-          name: test-results-${{ matrix.os }}
-          path: artifacts/testresults
+          name: build-artifacts-${{ matrix.os }}
+          path: |
+            **/bin/Release/
+            **/obj/Release/
+          retention-days: 1
 
-      - name: Upload Coverage
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-${{ matrix.os }}
-          path: artifacts/coverage
+  test:
+    needs: build
+    name: Run Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        dotnet: [ '8.0.x' ]
 
-  # Optional: publish the built app as an artifact (only once on Linux)
-  publish:
-    name: Publish (artifact)
-    runs-on: ubuntu-latest
-    needs: build-test
-    if: ${{ needs.build-test.result == 'success' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-      - run: dotnet restore AzureBatchJobAutomation.sln
-      - run: dotnet publish AzureBatchJobAutomation/AzureBatchJobAutomation.csproj -c Release -o out
-      - uses: actions/upload-artifact@v4
-        with:
-          name: published-app
-          path: out
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  summarize:
-    name: Summary (Passed / Failed / Skipped)
-    runs-on: ubuntu-latest
-    needs: build-test
-    steps:
-      - name: Download TRX artifacts from matrix
-        uses: actions/download-artifact@v4
+      - name: Setup .NET ${{ matrix.dotnet }}
+        uses: actions/setup-dotnet@v4
         with:
-          pattern: test-results-*
-          merge-multiple: true
-          path: downloads/testresults
+          dotnet-version: ${{ matrix.dotnet }}
 
-      # Optional: also publish a rich check with per-test details in the job logs/PR
-      - name: Publish Test Summary (TRX)
-        if: always()
-        uses: EnricoMi/publish-unit-test-result-action@v2
+      - name: Download build artifacts
+        uses: actions/download-artifact@v3
         with:
-          files: |
-            downloads/testresults/**/*.trx
-          check_name: "Batch Job Test Results Summary"
-          comment_mode: off
-          fail_on: nothing
+          name: build-artifacts-${{ matrix.os }}
 
-      # Lightweight totals in the run's Job Summary (top of the workflow run)
-      - name: Write totals to Job Summary
-        shell: pwsh
+      - name: Run Tests
         run: |
-          $trxFiles = Get-ChildItem -Path "downloads/testresults" -Recurse -Filter *.trx -ErrorAction SilentlyContinue
-          if (-not $trxFiles) {
-            "## Test Summary`nNo TRX files were found. Ensure test artifacts were uploaded from matrix jobs." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
-            exit 0
-          }
+          dotnet test Tests/*.cs --logger "trx;LogFileName=test-results.trx" --logger "console;verbosity=detailed" --configuration Release
+        continue-on-error: true
 
-          function N($v) { if ($null -eq $v -or $v -eq "") { 0 } else { [int]$v } }
+      - name: Test Report
+        uses: dorny/test-reporter@v1
+        if: success() || failure()
+        with:
+          name: Test Results (${{ matrix.os }})
+          path: "**/test-results.trx"
+          reporter: dotnet-trx
+          fail-on-error: false
 
-          $total = 0; $passed = 0; $failed = 0; $skipped = 0
-          $rows = @()
+      - name: Generate Test Summary
+        if: success() || failure()
+        run: |
+          echo "## Test Results Summary for ${{ matrix.os }}" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Passed: $(grep -c "outcome=\"Passed\"" **/test-results.trx)" >> $GITHUB_STEP_SUMMARY
+          echo "❌ Failed: $(grep -c "outcome=\"Failed\"" **/test-results.trx)" >> $GITHUB_STEP_SUMMARY
+          echo "⏭️ Skipped: $(grep -c "outcome=\"Skipped\"" **/test-results.trx)" >> $GITHUB_STEP_SUMMARY
 
-          foreach ($f in $trxFiles) {
-            try {
-              [xml]$xml = Get-Content $f.FullName
-              $c = $xml.TestRun.ResultSummary.Counters
-              $t_total   = N $c.total
-              $t_passed  = N $c.passed
-              $t_failed  = (N $c.failed) + (N $c.error)
-              $t_skipped = (N $c.notExecuted) + (N $c.inconclusive) + (N $c.notRunnable) + (N $c.pending) + (N $c.aborted) + (N $c.timeout)
-
-              $total  += $t_total
-              $passed += $t_passed
-              $failed += $t_failed
-              $skipped+= $t_skipped
-
-              $rows += "| $($f.Name) | $t_total | $t_passed | $t_failed | $t_skipped |"
-            } catch {
-              $rows += "| $($f.Name) | (parse error) | - | - | - |"
-            }
-          }
-
-          "## Test Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
-          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "**Totals across matrix (Ubuntu + Windows)**" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "| Metric | Count |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "|---|---:|" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "| Total | $total |"   | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "| Passed | $passed |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "| Failed | $failed |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "| Skipped | $skipped |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "**Per-file breakdown**" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "| TRX File | Total | Passed | Failed | Skipped |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "|---|---:|---:|---:|---:|" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          foreach ($r in $rows) { $r | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8 }
+   
