@@ -1,10 +1,10 @@
-name: .NET Build & Test (auto-split by class)
+name: .NET Build & Test (auto-split)
 
 on:
   push:
-    branches: ['**']          # run on all branches
+    branches: ['**']      # all branches
   pull_request:
-    branches: ['**']          # run for PRs targeting any branch
+    branches: ['**']      # all PRs
   workflow_dispatch: {}
 
 concurrency:
@@ -12,17 +12,16 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SOLUTION: BatchValidatorMockTest.sln
   DOTNET_VERSION: '8.0.x'
 
 jobs:
-  # Build once and also discover classes from the real test list
-  discover:
-    name: Build & discover test classes
+  prepare:
+    name: Detect solution, build, and discover test classes
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.discover.outputs.matrix }}
-      count:  ${{ steps.discover.outputs.count }}
+      solution: ${{ steps.detect.outputs.solution }}
+      matrix:   ${{ steps.discover.outputs.matrix }}
+      count:    ${{ steps.discover.outputs.count }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,20 +31,40 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: Detect solution file (*.sln)
+        id: detect
+        shell: bash
+        run: |
+          set -e
+          mapfile -t S <<< "$(git ls-files '*.sln')"
+          if [ "${#S[@]}" -eq 0 ]; then
+            echo "No .sln found at repo root. If your solution is in a subfolder, move it or set a fixed path."
+            exit 1
+          fi
+          # Prefer a solution containing 'Test' or 'Automation' in the name, else take the first
+          pick=""
+          for f in "${S[@]}"; do
+            case "$(basename "$f")" in
+              *Test*.sln|*Automation*.sln) pick="$f"; break ;;
+            esac
+          done
+          [ -z "$pick" ] && pick="${S[0]}"
+          echo "Using solution: $pick"
+          echo "solution=$pick" >> "$GITHUB_OUTPUT"
+
       - name: Restore
-        run: dotnet restore "${{ env.SOLUTION }}"
+        run: dotnet restore "${{ steps.detect.outputs.solution }}"
 
       - name: Build (Release)
-        run: dotnet build "${{ env.SOLUTION }}" --no-restore --configuration Release
+        run: dotnet build "${{ steps.detect.outputs.solution }}" --no-restore --configuration Release
 
-      - name: List tests & build class matrix
+      - name: List tests & build class matrix (xUnit)
         id: discover
         shell: pwsh
         run: |
-          # Get the list of tests from the built solution (xUnit)
-          $list = dotnet test "${{ env.SOLUTION }}" --no-build --list-tests
-
-          if (-not $list) {
+          $sln = "${{ steps.detect.outputs.solution }}"
+          $out = dotnet test $sln --no-build --list-tests
+          if (-not $out) {
             Write-Host "No tests listed."
             $empty = @{ class = @() } | ConvertTo-Json -Compress
             "matrix=$empty" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -53,52 +72,44 @@ jobs:
             exit 0
           }
 
-          # Each line is FQN.Method. Strip the last '.Method' to get class FQN, then take the class name.
-          $classNames = New-Object System.Collections.Generic.HashSet[string]
-          foreach ($line in $list) {
+          # Extract class names from FullyQualifiedName.Method
+          $classes = New-Object System.Collections.Generic.HashSet[string]
+          foreach ($line in $out) {
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            if ($line.Trim().StartsWith("The following Tests are available")) { continue }
-            if ($line.Trim().StartsWith("Test run for")) { continue }
-            if ($line.Trim().StartsWith("Discovering")) { continue }
-            if ($line.Trim().StartsWith("Discovered")) { continue }
-
-            # Keep only things that look like FQN.method
             if ($line -notmatch "\.") { continue }
-
-            # Remove trailing method part
             $lastDot = $line.LastIndexOf(".")
-            if ($lastDot -gt 0) {
-              $classFqn = $line.Substring(0, $lastDot)
-              # Get class name (last segment after dot)
-              $cls = ($classFqn.Split(".") | Select-Object -Last 1).Trim()
-              if ($cls) { $classNames.Add($cls) | Out-Null }
-            }
+            if ($lastDot -lt 1) { continue }
+            $classFqn = $line.Substring(0, $lastDot)
+            $cls = ($classFqn.Split(".") | Select-Object -Last 1).Trim()
+            if ($cls -and $cls -match "Tests$") { $classes.Add($cls) | Out-Null }
           }
 
-          if ($classNames.Count -eq 0) {
-            Write-Host "No class names parsed from the test list."
+          if ($classes.Count -eq 0) {
+            Write-Host "No test classes ending with 'Tests' were found."
             $empty = @{ class = @() } | ConvertTo-Json -Compress
             "matrix=$empty" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             "count=0"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             exit 0
           }
 
-          $matrixObj = @{ class = @($classNames) }
+          $matrixObj = @{ class = @($classes) }
           $json = $matrixObj | ConvertTo-Json -Compress
-          Write-Host "Discovered test classes: $(@($classNames) -join ', ')"
+          Write-Host "Discovered test classes: $(@($classes) -join ', ')"
           "matrix=$json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "count=$($classNames.Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "count=$($classes.Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
   tests:
     name: Tests • ${{ matrix.class }}
-    needs: discover
-    if: ${{ needs.discover.outputs.count != '0' }}
+    needs: prepare
+    if: ${{ needs.prepare.outputs.count != '0' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env:
-      CLASS: ${{ matrix.class }}
+      SOLUTION: ${{ needs.prepare.outputs.solution }}
+      CLASS:    ${{ matrix.class }}
+      DOTNET_VERSION: '8.0.x'
     steps:
       - uses: actions/checkout@v4
 
@@ -106,41 +117,38 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      # Build again here to keep jobs self-contained on a fresh runner
       - name: Restore
         run: dotnet restore "${{ env.SOLUTION }}"
+
       - name: Build (Release)
         run: dotnet build "${{ env.SOLUTION }}" --no-restore --configuration Release
 
-      # Sanity check: ensure at least one test contains ".Tests.<Class>."
-      - name: Ensure class exists (from test list)
+      - name: Ensure class exists in test list
         shell: pwsh
         run: |
           $list = dotnet test "${{ env.SOLUTION }}" --no-build --list-tests
-          # print first lines for visibility
           $list | Select-Object -First 100
-          if ($list -notmatch ("\.(Tests)\.$env:CLASS(\.|$)")) {
-            throw "No tests found matching pattern '.Tests.$env:CLASS'. Adjust class name if needed."
+          # Match ...<anything>.<CLASS>.<Method>
+          if ($list -notmatch ("(^|\.){0}\.(?=[^\.]+$|[^\.]+\s*$)|(^|\.){0}\." -f [regex]::Escape($env:CLASS))) {
+            throw "No tests found containing class '$env:CLASS'."
           }
 
       - name: Run tests for class (${{ env.CLASS }})
         run: |
-          # xUnit filtering via FullyQualifiedName contains
+          # xUnit filter: match any FullyQualifiedName that contains the class name
           dotnet test "${{ env.SOLUTION }}" \
             --no-build --configuration Release \
-            --filter "FullyQualifiedName~.Tests.${{ env.CLASS }}" \
+            --filter "FullyQualifiedName~${{ env.CLASS }}" \
             --logger "trx;LogFileName=${{ env.CLASS }}.trx" \
             --collect "XPlat Code Coverage"
 
-      - name: Collect TRX & coverage
+      - name: Collect TRX & coverage artifacts
         shell: bash
         run: |
           mkdir -p artifacts/testresults artifacts/coverage
           find . -type f -path "*/TestResults/*.trx" -exec cp {} artifacts/testresults/ \; || true
           find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
-          if [ -z "$(ls -A artifacts/testresults 2>/dev/null)" ]; then
-            echo "No TRX produced for ${CLASS}" > artifacts/testresults/no-tests.txt
-          fi
+          [ -z "$(ls -A artifacts/testresults 2>/dev/null)" ] && echo "No TRX produced for ${CLASS}" > artifacts/testresults/no-tests.txt || true
 
       - name: Upload TRX
         if: always()
