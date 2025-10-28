@@ -16,9 +16,9 @@ env:
   DOTNET_VERSION: '8.0.x'
   # If you want to be extra strict, set these to full namespaces:
   # e.g., BatchValidatorMockTest.Tests.BatchValidatorTests
-  FILTER_BATCH: BatchValidatorTests
-  FILTER_INTEGRATION: IntegrationTests
-  FILTER_JOBEXECUTOR: JobExecutorTests
+  FILTER_BATCH: tests.BatchValidatorTests
+  FILTER_INTEGRATION: tests.IntegrationTests
+  FILTER_JOBEXECUTOR: tests.JobExecutorTests
 
 jobs:
   build:
