@@ -1,0 +1,58 @@
+## ---------------------------------------
+##  batch-automation-mock .gitignore
+##  Clean setup for .NET 8 test projects
+## ---------------------------------------
+
+# === Core build artifacts ===
+**/bin/
+**/obj/
+**/out/
+**/publish/
+TestResults/
+coverage/
+.vs/
+
+# === Keep source test assets ===
+# Do not ignore ResponseFile folders (test data)
+!**/ResponseFile/**
+!**/ResponseFile/**/*
+
+# === Logs & temporary files ===
+*.log
+*.tmp
+*.temp
+*.cache
+*.pdb
+*.tlog
+*.svclog
+*.pidb
+
+# === IDE & tool configs ===
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.userprefs
+*.code-workspace
+*.DotSettings.user
+_ReSharper*/
+*.sln.iml
+*.sln.docstates
+
+# === NuGet & packages ===
+*.nupkg
+*.snupkg
+*.nuspec
+packages/
+*.nuget.props
+*.nuget.targets
+
+# === OS files ===
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# === Misc ===
+[Bb]uild[Ll]og.*.xml
