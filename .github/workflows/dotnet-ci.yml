@@ -1,4 +1,4 @@
-name: .NET Build & Test
+name: .NET Build & Split Tests
 
 on:
   push:
@@ -7,97 +7,219 @@ on:
     branches: [ main, master ]
   workflow_dispatch: {}
 
-# Avoid duplicate runs on the same branch/PR
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
-  build-test:
-    name: Build & Test (matrix)
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        dotnet: [ '8.0.x' ]   # bump or add versions as needed
+env:
+  SOLUTION: AzureBatchJobAutomation.sln
+  DOTNET_VERSION: '8.0.x'
 
+jobs:
+  build:
+    name: Build (Release)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET ${{ matrix.dotnet }}
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: ${{ matrix.dotnet }}
-
-      - name: Cache NuGet
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.nuget/packages
-            # Windows
-            ~\AppData\Local\NuGet\Cache
-            # Linux
-            ~/.local/share/NuGet/Cache
-          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.sln', '**/*.csproj', '**/packages.lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-nuget-
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Restore
-        run: dotnet restore AzureBatchJobAutomation.sln
+        run: dotnet restore ${{ env.SOLUTION }}
 
-      - name: Build (Release)
-        run: dotnet build AzureBatchJobAutomation.sln --no-restore --configuration Release
+      - name: Build
+        run: dotnet build ${{ env.SOLUTION }} --no-restore --configuration Release
 
-      # If your tests need appsettings*.json, your csproj already copies them.
-      # This will collect coverage via coverlet.collector and output TRX + Cobertura.
-      - name: Test with coverage
+  test-batch-validator:
+    name: Tests • BatchValidatorTests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Test (only BatchValidatorTests)
         run: |
-          dotnet test AzureBatchJobAutomation.sln \
-            --no-build --configuration Release \
-            --logger "trx;LogFileName=test_results.trx" \
+          dotnet test ${{ env.SOLUTION }} \
+            --configuration Release --no-build \
+            --filter "FullyQualifiedName~BatchValidatorTests" \
+            --logger "trx;LogFileName=BatchValidatorTests.trx" \
             --collect "XPlat Code Coverage"
 
-      # Grab artifacts (TRX + coverage) from all test projects
-      - name: Find test & coverage artifacts
+      - name: Gather artifacts
         shell: bash
         run: |
-          mkdir -p artifacts/testresults
-          mkdir -p artifacts/coverage
-          # TRX results
-          find . -type f -name "test_results.trx" -exec cp {} artifacts/testresults/ \; || true
-          # Coverage (Cobertura xml)
+          mkdir -p artifacts/testresults artifacts/coverage
+          find . -type f -name "BatchValidatorTests.trx" -exec cp {} artifacts/testresults/ \; || true
           find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
 
       - name: Upload Test Results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.os }}
+          name: test-results-batchvalidator
           path: artifacts/testresults
 
       - name: Upload Coverage
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-${{ matrix.os }}
+          name: coverage-batchvalidator
           path: artifacts/coverage
 
-  # Optional: publish the built app as an artifact (only once on Linux)
-  publish:
-    name: Publish (artifact)
+  test-integration:
+    name: Tests • IntegrationTests
     runs-on: ubuntu-latest
-    needs: build-test
-    if: ${{ needs.build-test.result == 'success' }}
+    needs: build
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
-      - run: dotnet restore AzureBatchJobAutomation.sln
-      - run: dotnet publish AzureBatchJobAutomation/AzureBatchJobAutomation.csproj -c Release -o out
-      - uses: actions/upload-artifact@v4
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Test (only IntegrationTests)
+        run: |
+          dotnet test ${{ env.SOLUTION }} \
+            --configuration Release --no-build \
+            --filter "FullyQualifiedName~IntegrationTests" \
+            --logger "trx;LogFileName=IntegrationTests.trx" \
+            --collect "XPlat Code Coverage"
+
+      - name: Gather artifacts
+        shell: bash
+        run: |
+          mkdir -p artifacts/testresults artifacts/coverage
+          find . -type f -name "IntegrationTests.trx" -exec cp {} artifacts/testresults/ \; || true
+          find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: published-app
-          path: out
+          name: test-results-integration
+          path: artifacts/testresults
+
+      - name: Upload Coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-integration
+          path: artifacts/coverage
+
+  test-job-executor:
+    name: Tests • JobExecutorTests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Test (only JobExecutorTests)
+        run: |
+          dotnet test ${{ env.SOLUTION }} \
+            --configuration Release --no-build \
+            --filter "FullyQualifiedName~JobExecutorTests" \
+            --logger "trx;LogFileName=JobExecutorTests.trx" \
+            --collect "XPlat Code Coverage"
+
+      - name: Gather artifacts
+        shell: bash
+        run: |
+          mkdir -p artifacts/testresults artifacts/coverage
+          find . -type f -name "JobExecutorTests.trx" -exec cp {} artifacts/testresults/ \; || true
+          find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-jobexecutor
+          path: artifacts/testresults
+
+      - name: Upload Coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-jobexecutor
+          path: artifacts/coverage
+
+  summarize:
+    name: 🧾 Summary (Passed / Failed / Skipped)
+    runs-on: ubuntu-latest
+    needs:
+      - test-batch-validator
+      - test-integration
+      - test-job-executor
+    steps:
+      - name: Download TRX artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          merge-multiple: true
+          path: downloads/testresults
+
+      - name: Build summary from TRX
+        shell: pwsh
+        run: |
+          # Collect TRX files
+          $trxFiles = Get-ChildItem -Path "downloads/testresults" -Recurse -Filter *.trx -ErrorAction SilentlyContinue
+          if (-not $trxFiles) {
+            "# Test Summary`n`nNo TRX files found." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+            exit 0
+          }
+
+          # Totals
+          $total = 0; $passed = 0; $failed = 0; $skipped = 0
+          $rows = @()
+
+          foreach ($f in $trxFiles) {
+            try {
+              [xml]$xml = Get-Content $f.FullName
+              $c = $xml.TestRun.ResultSummary.Counters
+
+              # Safely coerce numeric values (treat null as 0)
+              function N($v) { if ($null -eq $v -or $v -eq "") { return 0 } else { return [int]$v } }
+
+              $t_total   = N $c.total
+              $t_passed  = N $c.passed
+              $t_failed  = (N $c.failed) + (N $c.error)
+              $t_skipped = (N $c.notExecuted) + (N $c.inconclusive) + (N $c.notRunnable) + (N $c.pending) + (N $c.aborted) + (N $c.timeout)
+
+              $total  += $t_total
+              $passed += $t_passed
+              $failed += $t_failed
+              $skipped+= $t_skipped
+
+              $rows += "| $($f.Name) | $t_total | $t_passed | $t_failed | $t_skipped |"
+            } catch {
+              $rows += "| $($f.Name) | (parse error) | - | - | - |"
+            }
+          }
+
+          # Write markdown summary without here-strings (to avoid YAML quoting issues)
+          "## Test Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+          ""                | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "**Totals across all jobs**" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          ""                | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "| Metric | Count |"               | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "|---|---:|"                       | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "| Total | $total |"               | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "| Passed | $passed |"             | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "| Failed | $failed |"             | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "| Skipped | $skipped |"           | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          ""                | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "**Per-file (job) breakdown**" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          ""                | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "| TRX File | Total | Passed | Failed | Skipped |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "|---|---:|---:|---:|---:|"                        | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          foreach ($r in $rows) {
+            $r | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          }
