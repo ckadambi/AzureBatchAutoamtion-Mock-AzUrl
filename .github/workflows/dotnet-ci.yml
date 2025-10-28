@@ -1,0 +1,103 @@
+name: .NET Build & Test
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+# Avoid duplicate runs on the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & Test (matrix)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        dotnet: [ '8.0.x' ]   # bump or add versions as needed
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET ${{ matrix.dotnet }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet }}
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nuget/packages
+            # Windows
+            ~\AppData\Local\NuGet\Cache
+            # Linux
+            ~/.local/share/NuGet/Cache
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.sln', '**/*.csproj', '**/packages.lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore
+        run: dotnet restore AzureBatchJobAutomation.sln
+
+      - name: Build (Release)
+        run: dotnet build AzureBatchJobAutomation.sln --no-restore --configuration Release
+
+      # If your tests need appsettings*.json, your csproj already copies them.
+      # This will collect coverage via coverlet.collector and output TRX + Cobertura.
+      - name: Test with coverage
+        run: |
+          dotnet test AzureBatchJobAutomation.sln \
+            --no-build --configuration Release \
+            --logger "trx;LogFileName=test_results.trx" \
+            --collect "XPlat Code Coverage"
+
+      # Grab artifacts (TRX + coverage) from all test projects
+      - name: Find test & coverage artifacts
+        shell: bash
+        run: |
+          mkdir -p artifacts/testresults
+          mkdir -p artifacts/coverage
+          # TRX results
+          find . -type f -name "test_results.trx" -exec cp {} artifacts/testresults/ \; || true
+          # Coverage (Cobertura xml)
+          find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: artifacts/testresults
+
+      - name: Upload Coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}
+          path: artifacts/coverage
+
+  # Optional: publish the built app as an artifact (only once on Linux)
+  publish:
+    name: Publish (artifact)
+    runs-on: ubuntu-latest
+    needs: build-test
+    if: ${{ needs.build-test.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet restore AzureBatchJobAutomation.sln
+      - run: dotnet publish AzureBatchJobAutomation/AzureBatchJobAutomation.csproj -c Release -o out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: published-app
+          path: out

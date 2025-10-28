@@ -1,0 +1,7 @@
+[2025-09-18T14:45:02.123Z] Executing 'Functions.HttpTrigger1' (Reason='This function was triggered by an HTTP request.', Id=1d4a7a8f-93e5-4e0d-9f62-7f3f51d81eaa)
+[2025-09-18T14:45:02.456Z] Information: HttpTrigger1 function started processing a request.
+[2025-09-18T14:45:02.457Z] Information: Request Method: GET
+[2025-09-18T14:45:02.458Z] Information: Request Path: /api/HttpTrigger1?name=User
+[2025-09-18T14:45:02.460Z] Information: Query parameter 'name' = User
+[2025-09-18T14:45:02.600Z] Information: Successfully processed request. Returning 200 OK with response: "Hello, User. This HTTP triggered function executed successfully."
+[2025-09-18T14:45:02.789Z] Executed 'Functions.HttpTrigger1' (Succeeded, Id=1d4a7a8f-93e5-4e0d-9f62-7f3f51d81eaa, Duration=666ms)
