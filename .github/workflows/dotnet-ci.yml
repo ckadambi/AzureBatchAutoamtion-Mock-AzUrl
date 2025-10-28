@@ -44,20 +44,40 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      # 1) Verify at least one test matches the filter
+      - name: Assert tests exist for BatchValidatorTests
+        shell: bash
+        run: |
+          set -e
+          cnt=$(dotnet test ${{ env.SOLUTION }} --no-build --list-tests --filter "FullyQualifiedName~BatchValidatorTests" | grep -E "^\s*[0-9]+\." | wc -l || true)
+          echo "Discovered tests: $cnt"
+          if [ "$cnt" -eq 0 ]; then
+            echo "No tests matched filter: FullyQualifiedName~BatchValidatorTests"
+            exit 1
+          fi
+
+      # 2) Run tests and generate TRX + coverage
       - name: Test (only BatchValidatorTests)
         run: |
           dotnet test ${{ env.SOLUTION }} \
             --configuration Release --no-build \
             --filter "FullyQualifiedName~BatchValidatorTests" \
-            --logger "trx;LogFileName=BatchValidatorTests.trx" \
+            --logger "trx" \
             --collect "XPlat Code Coverage"
 
+      # 3) Gather artifacts (TRX + coverage)
       - name: Gather artifacts
         shell: bash
         run: |
           mkdir -p artifacts/testresults artifacts/coverage
-          find . -type f -name "BatchValidatorTests.trx" -exec cp {} artifacts/testresults/ \; || true
+          # TRX from any test project
+          find . -type f -path "*/TestResults/*.trx" -exec cp {} artifacts/testresults/ \; || true
+          # Coverage (Cobertura)
           find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
+          # Ensure something exists so the artifact is created
+          if [ -z "$(ls -A artifacts/testresults 2>/dev/null)" ]; then
+            echo "No TRX produced (check test filter/results)" > artifacts/testresults/no-tests.txt
+          fi
 
       - name: Upload Test Results
         if: always()
@@ -65,6 +85,7 @@ jobs:
         with:
           name: test-results-batchvalidator
           path: artifacts/testresults
+          if-no-files-found: warn
 
       - name: Upload Coverage
         if: always()
@@ -72,6 +93,7 @@ jobs:
         with:
           name: coverage-batchvalidator
           path: artifacts/coverage
+          if-no-files-found: warn
 
   test-integration:
     name: Tests • IntegrationTests
@@ -83,20 +105,34 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: Assert tests exist for IntegrationTests
+        shell: bash
+        run: |
+          set -e
+          cnt=$(dotnet test ${{ env.SOLUTION }} --no-build --list-tests --filter "FullyQualifiedName~IntegrationTests" | grep -E "^\s*[0-9]+\." | wc -l || true)
+          echo "Discovered tests: $cnt"
+          if [ "$cnt" -eq 0 ]; then
+            echo "No tests matched filter: FullyQualifiedName~IntegrationTests"
+            exit 1
+          fi
+
       - name: Test (only IntegrationTests)
         run: |
           dotnet test ${{ env.SOLUTION }} \
             --configuration Release --no-build \
             --filter "FullyQualifiedName~IntegrationTests" \
-            --logger "trx;LogFileName=IntegrationTests.trx" \
+            --logger "trx" \
             --collect "XPlat Code Coverage"
 
       - name: Gather artifacts
         shell: bash
         run: |
           mkdir -p artifacts/testresults artifacts/coverage
-          find . -type f -name "IntegrationTests.trx" -exec cp {} artifacts/testresults/ \; || true
+          find . -type f -path "*/TestResults/*.trx" -exec cp {} artifacts/testresults/ \; || true
           find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
+          if [ -z "$(ls -A artifacts/testresults 2>/dev/null)" ]; then
+            echo "No TRX produced (check test filter/results)" > artifacts/testresults/no-tests.txt
+          fi
 
       - name: Upload Test Results
         if: always()
@@ -104,6 +140,7 @@ jobs:
         with:
           name: test-results-integration
           path: artifacts/testresults
+          if-no-files-found: warn
 
       - name: Upload Coverage
         if: always()
@@ -111,6 +148,7 @@ jobs:
         with:
           name: coverage-integration
           path: artifacts/coverage
+          if-no-files-found: warn
 
   test-job-executor:
     name: Tests • JobExecutorTests
@@ -122,20 +160,34 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: Assert tests exist for JobExecutorTests
+        shell: bash
+        run: |
+          set -e
+          cnt=$(dotnet test ${{ env.SOLUTION }} --no-build --list-tests --filter "FullyQualifiedName~JobExecutorTests" | grep -E "^\s*[0-9]+\." | wc -l || true)
+          echo "Discovered tests: $cnt"
+          if [ "$cnt" -eq 0 ]; then
+            echo "No tests matched filter: FullyQualifiedName~JobExecutorTests"
+            exit 1
+          fi
+
       - name: Test (only JobExecutorTests)
         run: |
           dotnet test ${{ env.SOLUTION }} \
             --configuration Release --no-build \
             --filter "FullyQualifiedName~JobExecutorTests" \
-            --logger "trx;LogFileName=JobExecutorTests.trx" \
+            --logger "trx" \
             --collect "XPlat Code Coverage"
 
       - name: Gather artifacts
         shell: bash
         run: |
           mkdir -p artifacts/testresults artifacts/coverage
-          find . -type f -name "JobExecutorTests.trx" -exec cp {} artifacts/testresults/ \; || true
+          find . -type f -path "*/TestResults/*.trx" -exec cp {} artifacts/testresults/ \; || true
           find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
+          if [ -z "$(ls -A artifacts/testresults 2>/dev/null)" ]; then
+            echo "No TRX produced (check test filter/results)" > artifacts/testresults/no-tests.txt
+          fi
 
       - name: Upload Test Results
         if: always()
@@ -143,6 +195,7 @@ jobs:
         with:
           name: test-results-jobexecutor
           path: artifacts/testresults
+          if-no-files-found: warn
 
       - name: Upload Coverage
         if: always()
@@ -150,6 +203,7 @@ jobs:
         with:
           name: coverage-jobexecutor
           path: artifacts/coverage
+          if-no-files-found: warn
 
   summarize:
     name: 🧾 Summary (Passed / Failed / Skipped)
@@ -169,14 +223,15 @@ jobs:
       - name: Build summary from TRX
         shell: pwsh
         run: |
-          # Collect TRX files
           $trxFiles = Get-ChildItem -Path "downloads/testresults" -Recurse -Filter *.trx -ErrorAction SilentlyContinue
+
           if (-not $trxFiles) {
-            "# Test Summary`n`nNo TRX files found." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+            "## Test Summary`nNo TRX files were downloaded. The earlier jobs may have found 0 matching tests." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
             exit 0
           }
 
-          # Totals
+          function N($v) { if ($null -eq $v -or $v -eq "") { 0 } else { [int]$v } }
+
           $total = 0; $passed = 0; $failed = 0; $skipped = 0
           $rows = @()
 
@@ -184,10 +239,6 @@ jobs:
             try {
               [xml]$xml = Get-Content $f.FullName
               $c = $xml.TestRun.ResultSummary.Counters
-
-              # Safely coerce numeric values (treat null as 0)
-              function N($v) { if ($null -eq $v -or $v -eq "") { return 0 } else { return [int]$v } }
-
               $t_total   = N $c.total
               $t_passed  = N $c.passed
               $t_failed  = (N $c.failed) + (N $c.error)
@@ -204,22 +255,19 @@ jobs:
             }
           }
 
-          # Write markdown summary without here-strings (to avoid YAML quoting issues)
           "## Test Summary" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
-          ""                | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
           "**Totals across all jobs**" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          ""                | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "| Metric | Count |"               | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "|---|---:|"                       | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "| Total | $total |"               | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "| Passed | $passed |"             | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "| Failed | $failed |"             | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          "| Skipped | $skipped |"           | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          ""                | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "| Metric | Count |"      | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "|---|---:|"              | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "| Total | $total |"      | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "| Passed | $passed |"    | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "| Failed | $failed |"    | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "| Skipped | $skipped |"  | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
           "**Per-file (job) breakdown**" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          ""                | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
+          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
           "| TRX File | Total | Passed | Failed | Skipped |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
           "|---|---:|---:|---:|---:|"                        | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          foreach ($r in $rows) {
-            $r | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8
-          }
+          foreach ($r in $rows) { $r | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding UTF8 }
