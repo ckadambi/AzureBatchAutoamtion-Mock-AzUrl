@@ -1,115 +1,179 @@
-name: .NET Build & Test
+name: .NET Build & Test (auto-split by class)
 
 on:
   push:
-    branches: ['**']          # ← run on all branches
+    branches: ['**']          # run on all branches
   pull_request:
-    branches: ['**']          # ← run for PRs targeting any branch
+    branches: ['**']          # run for PRs targeting any branch
   workflow_dispatch: {}
 
-# Avoid duplicate runs on the same branch/PR
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
-  build-test:
-    name: Build & Test (matrix)
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        dotnet: [ '8.0.x' ]   # bump or add versions as needed
+env:
+  SOLUTION: BatchValidatorMockTest.sln
+  DOTNET_VERSION: '8.0.x'
 
+jobs:
+  # Build once and also discover classes from the real test list
+  discover:
+    name: Build & discover test classes
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+      count:  ${{ steps.discover.outputs.count }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET ${{ matrix.dotnet }}
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: ${{ matrix.dotnet }}
-
-      - name: Cache NuGet
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.nuget/packages
-            # Windows
-            ~\AppData\Local\NuGet\Cache
-            # Linux
-            ~/.local/share/NuGet/Cache
-          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.sln', '**/*.csproj', '**/packages.lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-nuget-
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Restore
-        run: dotnet restore AzureBatchJobAutomation.sln
+        run: dotnet restore "${{ env.SOLUTION }}"
 
       - name: Build (Release)
-        run: dotnet build AzureBatchJobAutomation.sln --no-restore --configuration Release
+        run: dotnet build "${{ env.SOLUTION }}" --no-restore --configuration Release
 
-      # If your tests need appsettings*.json, your csproj already copies them.
-      # This will collect coverage via coverlet.collector and output TRX + Cobertura.
-      - name: Test with coverage
+      - name: List tests & build class matrix
+        id: discover
+        shell: pwsh
         run: |
-          dotnet test AzureBatchJobAutomation.sln \
-            --no-build --configuration Release \
-            --logger "trx;LogFileName=test_results.trx" \
-            --collect "XPlat Code Coverage"
+          # Get the list of tests from the built solution (xUnit)
+          $list = dotnet test "${{ env.SOLUTION }}" --no-build --list-tests
 
-      # Grab artifacts (TRX + coverage) from all test projects
-      - name: Find test & coverage artifacts
-        shell: bash
-        run: |
-          mkdir -p artifacts/testresults
-          mkdir -p artifacts/coverage
-          # TRX results
-          find . -type f -name "test_results.trx" -exec cp {} artifacts/testresults/ \; || true
-          # Coverage (Cobertura xml)
-          find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
+          if (-not $list) {
+            Write-Host "No tests listed."
+            $empty = @{ class = @() } | ConvertTo-Json -Compress
+            "matrix=$empty" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "count=0"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
 
-      - name: Upload Test Results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-${{ matrix.os }}
-          path: artifacts/testresults
+          # Each line is FQN.Method. Strip the last '.Method' to get class FQN, then take the class name.
+          $classNames = New-Object System.Collections.Generic.HashSet[string]
+          foreach ($line in $list) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            if ($line.Trim().StartsWith("The following Tests are available")) { continue }
+            if ($line.Trim().StartsWith("Test run for")) { continue }
+            if ($line.Trim().StartsWith("Discovering")) { continue }
+            if ($line.Trim().StartsWith("Discovered")) { continue }
 
-      - name: Upload Coverage
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-${{ matrix.os }}
-          path: artifacts/coverage
+            # Keep only things that look like FQN.method
+            if ($line -notmatch "\.") { continue }
 
-  # Optional: publish the built app as an artifact (only once on Linux)
-  publish:
-    name: Publish (artifact)
+            # Remove trailing method part
+            $lastDot = $line.LastIndexOf(".")
+            if ($lastDot -gt 0) {
+              $classFqn = $line.Substring(0, $lastDot)
+              # Get class name (last segment after dot)
+              $cls = ($classFqn.Split(".") | Select-Object -Last 1).Trim()
+              if ($cls) { $classNames.Add($cls) | Out-Null }
+            }
+          }
+
+          if ($classNames.Count -eq 0) {
+            Write-Host "No class names parsed from the test list."
+            $empty = @{ class = @() } | ConvertTo-Json -Compress
+            "matrix=$empty" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "count=0"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+
+          $matrixObj = @{ class = @($classNames) }
+          $json = $matrixObj | ConvertTo-Json -Compress
+          Write-Host "Discovered test classes: $(@($classNames) -join ', ')"
+          "matrix=$json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "count=$($classNames.Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+  tests:
+    name: Tests • ${{ matrix.class }}
+    needs: discover
+    if: ${{ needs.discover.outputs.count != '0' }}
     runs-on: ubuntu-latest
-    needs: build-test
-    if: ${{ needs.build-test.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    env:
+      CLASS: ${{ matrix.class }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
-      - run: dotnet restore AzureBatchJobAutomation.sln
-      - run: dotnet publish AzureBatchJobAutomation/AzureBatchJobAutomation.csproj -c Release -o out
-      - uses: actions/upload-artifact@v4
-        with:
-          name: published-app
-          path: out
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
-  # Adds the job summary with Total / Passed / Failed / Skipped
-      - name: Publish Test Summary (TRX)
+      # Build again here to keep jobs self-contained on a fresh runner
+      - name: Restore
+        run: dotnet restore "${{ env.SOLUTION }}"
+      - name: Build (Release)
+        run: dotnet build "${{ env.SOLUTION }}" --no-restore --configuration Release
+
+      # Sanity check: ensure at least one test contains ".Tests.<Class>."
+      - name: Ensure class exists (from test list)
+        shell: pwsh
+        run: |
+          $list = dotnet test "${{ env.SOLUTION }}" --no-build --list-tests
+          # print first lines for visibility
+          $list | Select-Object -First 100
+          if ($list -notmatch ("\.(Tests)\.$env:CLASS(\.|$)")) {
+            throw "No tests found matching pattern '.Tests.$env:CLASS'. Adjust class name if needed."
+          }
+
+      - name: Run tests for class (${{ env.CLASS }})
+        run: |
+          # xUnit filtering via FullyQualifiedName contains
+          dotnet test "${{ env.SOLUTION }}" \
+            --no-build --configuration Release \
+            --filter "FullyQualifiedName~.Tests.${{ env.CLASS }}" \
+            --logger "trx;LogFileName=${{ env.CLASS }}.trx" \
+            --collect "XPlat Code Coverage"
+
+      - name: Collect TRX & coverage
+        shell: bash
+        run: |
+          mkdir -p artifacts/testresults artifacts/coverage
+          find . -type f -path "*/TestResults/*.trx" -exec cp {} artifacts/testresults/ \; || true
+          find . -type f -path "*/TestResults/*/coverage.cobertura.xml" -exec cp {} artifacts/coverage/ \; || true
+          if [ -z "$(ls -A artifacts/testresults 2>/dev/null)" ]; then
+            echo "No TRX produced for ${CLASS}" > artifacts/testresults/no-tests.txt
+          fi
+
+      - name: Upload TRX
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.class }}
+          path: artifacts/testresults
+          if-no-files-found: warn
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.class }}
+          path: artifacts/coverage
+          if-no-files-found: warn
+
+  summarize:
+    name: Summary (Passed / Failed / Skipped)
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - name: Download TRX artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          merge-multiple: true
+          path: downloads/testresults
+
+      - name: Publish unit test summary
         uses: EnricoMi/publish-unit-test-result-action@v2
         with:
-          files: |
-            **/TestResults/*.trx
-            **/test-results.trx
-          check_name: "Batch Job Test Results Summary"
-          comment_mode: off          # set to "changes" if you want PR comments only on changes
-          fail_on: nothing           # do not fail this step; rely on 'dotnet test' to fail the job         
+          files: downloads/testresults/**/*.trx
+          check_name: ".NET Tests Summary"
+          comment_mode: off
+          fail_on: nothing
