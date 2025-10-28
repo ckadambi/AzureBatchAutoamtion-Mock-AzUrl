@@ -86,7 +86,7 @@ jobs:
 
       - name: Run Validator Tests
         run: |
-          dotnet test Tests/BatchValidatorTests.cs --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=validator-tests.trx"
+          dotnet test "Tests/BatchValidator*.cs" --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=validator-tests.trx"
         continue-on-error: true
 
       - name: Generate Test Report
@@ -133,7 +133,7 @@ jobs:
 
       - name: Run Executor Tests
         run: |
-          dotnet test Tests/JobExecutorTests.cs --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=executor-tests.trx"
+          dotnet test "Tests/*Executor*.cs" --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=executor-tests.trx"
         continue-on-error: true
 
       - name: Generate Test Report
@@ -180,10 +180,10 @@ jobs:
 
       - name: Run Integration Tests
         run: |
-          dotnet test Tests/IntegrationTests.cs --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=integration-tests.trx"
+          dotnet test "Tests/*Integration*.cs" --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=integration-tests.trx"
         continue-on-error: true
 
-      - name: Generate Integration Test Report
+      - name: Generate Test Report
         uses: dorny/test-reporter@v1
         if: always()
         with:
